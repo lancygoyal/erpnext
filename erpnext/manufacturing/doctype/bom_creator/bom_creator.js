@@ -88,6 +88,13 @@ frappe.ui.form.on("BOM Creator", {
 					reqd: 1,
 					default: 1.0,
 				},
+				{ fieldtype: "Section Break" },
+				{
+					label: __("Routing"),
+					fieldtype: "Link",
+					fieldname: "routing",
+					options: "Routing",
+				},
 			],
 			primary_action_label: __("Create"),
 			primary_action: (values) => {
@@ -120,6 +127,16 @@ frappe.ui.form.on("BOM Creator", {
 			return {
 				query: "erpnext.controllers.queries.item_query",
 			};
+		});
+
+		frm.set_query("workstation", (doc) => {
+			if (doc.workstation_type) {
+				return {
+					filters: {
+						workstation_type: doc.workstation_type,
+					},
+				};
+			}
 		});
 	},
 
@@ -212,7 +229,6 @@ erpnext.bom.BomConfigurator = class BomConfigurator extends erpnext.TransactionC
 			item.stock_qty = flt(item.qty * item.conversion_factor, precision("stock_qty", item));
 			refresh_field("stock_qty", item.name, item.parentfield);
 			this.toggle_conversion_factor(item);
-			this.frm.events.update_cost(this.frm);
 		}
 	}
 };

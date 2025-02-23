@@ -5,10 +5,39 @@ frappe.provide("erpnext.buying");
 
 erpnext.landed_cost_taxes_and_charges.setup_triggers("Subcontracting Order");
 
+// client script for Subcontracting Order Item is not necessarily required as the server side code will do everything that is necessary.
+// this is just so that the user does not get potentially confused
+frappe.ui.form.on("Subcontracting Order Item", {
+	qty(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frappe.model.set_value(cdt, cdn, "amount", row.qty * row.rate);
+		const service_item = frm.doc.service_items[row.idx - 1];
+		frappe.model.set_value(
+			service_item.doctype,
+			service_item.name,
+			"qty",
+			row.qty * row.sc_conversion_factor
+		);
+		frappe.model.set_value(service_item.doctype, service_item.name, "fg_item_qty", row.qty);
+		frappe.model.set_value(
+			service_item.doctype,
+			service_item.name,
+			"amount",
+			row.qty * row.sc_conversion_factor * service_item.rate
+		);
+	},
+	before_items_remove(frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		frm.toggle_enable(["service_items"], true);
+		frm.get_field("service_items").grid.grid_rows[row.idx - 1].remove();
+		frm.toggle_enable(["service_items"], false);
+	},
+});
+
 frappe.ui.form.on("Subcontracting Order", {
 	setup: (frm) => {
 		frm.get_field("items").grid.cannot_add_rows = true;
-		frm.get_field("items").grid.only_sortable();
+		frm.trigger("set_queries");
 
 		frm.set_indicator_formatter("item_code", (doc) => (doc.qty <= doc.received_qty ? "green" : "orange"));
 
@@ -27,6 +56,22 @@ frappe.ui.form.on("Subcontracting Order", {
 					docstatus: 1,
 					is_subcontracted: 1,
 					is_old_subcontracting_flow: 0,
+				},
+			};
+		});
+
+		frm.set_query("cost_center", (doc) => {
+			return {
+				filters: {
+					company: doc.company,
+				},
+			};
+		});
+
+		frm.set_query("cost_center", "items", (doc) => {
+			return {
+				filters: {
+					company: doc.company,
 				},
 			};
 		});
@@ -77,6 +122,17 @@ frappe.ui.form.on("Subcontracting Order", {
 		});
 	},
 
+	set_queries: (frm) => {
+		frm.set_query("contact_person", erpnext.queries.contact_query);
+		frm.set_query("supplier_address", erpnext.queries.address_query);
+
+		frm.set_query("billing_address", erpnext.queries.company_address_query);
+
+		frm.set_query("shipping_address", () => {
+			return erpnext.queries.company_address_query(frm.doc);
+		});
+	},
+
 	onload: (frm) => {
 		if (!frm.doc.transaction_date) {
 			frm.set_value("transaction_date", frappe.datetime.get_today());
@@ -100,6 +156,8 @@ frappe.ui.form.on("Subcontracting Order", {
 	},
 
 	refresh: function (frm) {
+		frappe.dynamic_link = { doc: frm.doc, fieldname: "supplier", doctype: "Supplier" };
+
 		if (frm.doc.docstatus == 1 && frm.has_perm("submit")) {
 			if (frm.doc.status == "Closed") {
 				frm.add_custom_button(
@@ -196,20 +254,24 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 		if (doc.docstatus == 1) {
 			if (!["Closed", "Completed"].includes(doc.status)) {
 				if (flt(doc.per_received) < 100) {
-					cur_frm.add_custom_button(
+					this.frm.add_custom_button(
 						__("Subcontracting Receipt"),
 						this.make_subcontracting_receipt,
 						__("Create")
 					);
 					if (me.has_unsupplied_items()) {
-						cur_frm.add_custom_button(
+						this.frm.add_custom_button(
 							__("Material to Supplier"),
 							this.make_stock_entry,
 							__("Transfer")
 						);
 					}
 				}
-				cur_frm.page.set_inner_btn_group_as_primary(__("Create"));
+				if (flt(doc.per_received) < 100 && me.has_unsupplied_items()) {
+					this.frm.page.set_inner_btn_group_as_primary(__("Transfer"));
+				} else {
+					this.frm.page.set_inner_btn_group_as_primary(__("Create"));
+				}
 			}
 		}
 	}
@@ -235,9 +297,11 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 	}
 
 	has_unsupplied_items() {
-		return this.frm.doc["supplied_items"].some(
-			(item) => item.required_qty > item.supplied_qty - item.returned_qty
-		);
+		let over_transfer_allowance = this.frm.doc.__onload.over_transfer_allowance;
+		return this.frm.doc["supplied_items"].some((item) => {
+			let required_qty = item.required_qty + (item.required_qty * over_transfer_allowance) / 100;
+			return required_qty > item.supplied_qty - item.returned_qty;
+		});
 	}
 
 	make_subcontracting_receipt() {

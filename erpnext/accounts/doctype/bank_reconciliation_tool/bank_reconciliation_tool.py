@@ -12,6 +12,7 @@ from frappe.utils import cint, flt
 
 from erpnext import get_default_cost_center
 from erpnext.accounts.doctype.bank_transaction.bank_transaction import get_total_allocated_amount
+from erpnext.accounts.party import get_party_account
 from erpnext.accounts.report.bank_reconciliation_statement.bank_reconciliation_statement import (
 	get_amounts_not_reflected_in_system,
 	get_entries,
@@ -78,11 +79,16 @@ def get_bank_transactions(bank_account, from_date=None, to_date=None):
 
 
 @frappe.whitelist()
-def get_account_balance(bank_account, till_date):
+def get_account_balance(bank_account, till_date, company):
 	# returns account balance till the specified date
 	account = frappe.db.get_value("Bank Account", bank_account, "account")
 	filters = frappe._dict(
-		{"account": account, "report_date": till_date, "include_pos_transactions": 1}
+		{
+			"account": account,
+			"report_date": till_date,
+			"include_pos_transactions": 1,
+			"company": company,
+		}
 	)
 	data = get_entries(filters)
 
@@ -95,14 +101,7 @@ def get_account_balance(bank_account, till_date):
 
 	amounts_not_reflected_in_system = get_amounts_not_reflected_in_system(filters)
 
-	bank_bal = (
-		flt(balance_as_per_system)
-		- flt(total_debit)
-		+ flt(total_credit)
-		+ amounts_not_reflected_in_system
-	)
-
-	return bank_bal
+	return flt(balance_as_per_system) - flt(total_debit) + flt(total_credit) + amounts_not_reflected_in_system
 
 
 @frappe.whitelist()
@@ -309,54 +308,56 @@ def create_payment_entry_bts(
 	bank_transaction = frappe.db.get_values(
 		"Bank Transaction",
 		bank_transaction_name,
-		fieldname=["name", "unallocated_amount", "deposit", "bank_account"],
+		fieldname=["name", "unallocated_amount", "deposit", "bank_account", "currency"],
 		as_dict=True,
 	)[0]
-	paid_amount = bank_transaction.unallocated_amount
+
 	payment_type = "Receive" if bank_transaction.deposit > 0.0 else "Pay"
 
-	company_account = frappe.get_value("Bank Account", bank_transaction.bank_account, "account")
-	company = frappe.get_value("Account", company_account, "company")
-	payment_entry_dict = {
-		"company": company,
-		"payment_type": payment_type,
-		"reference_no": reference_number,
-		"reference_date": reference_date,
-		"party_type": party_type,
-		"party": party,
-		"posting_date": posting_date,
-		"paid_amount": paid_amount,
-		"received_amount": paid_amount,
-	}
-	payment_entry = frappe.new_doc("Payment Entry")
+	bank_account = frappe.get_cached_value("Bank Account", bank_transaction.bank_account, "account")
+	company = frappe.get_cached_value("Account", bank_account, "company")
+	party_account = get_party_account(party_type, party, company)
 
-	payment_entry.update(payment_entry_dict)
+	bank_currency = bank_transaction.currency
+	party_currency = frappe.get_cached_value("Account", party_account, "account_currency")
 
-	if mode_of_payment:
-		payment_entry.mode_of_payment = mode_of_payment
-	if project:
-		payment_entry.project = project
-	if cost_center:
-		payment_entry.cost_center = cost_center
-	if payment_type == "Receive":
-		payment_entry.paid_to = company_account
-	else:
-		payment_entry.paid_from = company_account
+	exc_rate = get_exchange_rate(bank_currency, party_currency, posting_date)
 
-	payment_entry.validate()
+	amt_in_bank_acc_currency = bank_transaction.unallocated_amount
+	amount_in_party_currency = bank_transaction.unallocated_amount * exc_rate
+
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = payment_type
+	pe.company = company
+	pe.reference_no = reference_number
+	pe.reference_date = reference_date
+	pe.party_type = party_type
+	pe.party = party
+	pe.posting_date = posting_date
+	pe.paid_from = party_account if payment_type == "Receive" else bank_account
+	pe.paid_to = party_account if payment_type == "Pay" else bank_account
+	pe.paid_from_account_currency = party_currency if payment_type == "Receive" else bank_currency
+	pe.paid_to_account_currency = party_currency if payment_type == "Pay" else bank_currency
+	pe.paid_amount = amount_in_party_currency if payment_type == "Receive" else amt_in_bank_acc_currency
+	pe.received_amount = amount_in_party_currency if payment_type == "Pay" else amt_in_bank_acc_currency
+	pe.mode_of_payment = mode_of_payment
+	pe.project = project
+	pe.cost_center = cost_center
+
+	pe.validate()
 
 	if allow_edit:
-		return payment_entry
+		return pe
 
-	payment_entry.insert()
+	pe.insert()
+	pe.submit()
 
-	payment_entry.submit()
 	vouchers = json.dumps(
 		[
 			{
 				"payment_doctype": "Payment Entry",
-				"payment_name": payment_entry.name,
-				"amount": paid_amount,
+				"payment_name": pe.name,
+				"amount": amt_in_bank_acc_currency,
 			}
 		]
 	)
@@ -485,8 +486,12 @@ def get_linked_payments(
 def subtract_allocations(gl_account, vouchers):
 	"Look up & subtract any existing Bank Transaction allocations"
 	copied = []
+
+	voucher_docs = [(voucher.get("doctype"), voucher.get("name")) for voucher in vouchers]
+	voucher_allocated_amounts = get_total_allocated_amount(voucher_docs)
+
 	for voucher in vouchers:
-		rows = get_total_allocated_amount(voucher.get("doctype"), voucher.get("name"))
+		rows = voucher_allocated_amounts.get((voucher.get("doctype"), voucher.get("name"))) or []
 		filtered_row = list(filter(lambda row: row.get("gl_account") == gl_account, rows))
 
 		if amount := None if not filtered_row else filtered_row[0]["total"]:
@@ -500,12 +505,12 @@ def check_matching(
 	bank_account,
 	company,
 	transaction,
-	document_types,
-	from_date,
-	to_date,
-	filter_by_reference_date,
-	from_reference_date,
-	to_reference_date,
+	document_types=None,
+	from_date=None,
+	to_date=None,
+	filter_by_reference_date=None,
+	from_reference_date=None,
+	to_reference_date=None,
 ):
 	exact_match = True if "exact_match" in document_types else False
 
@@ -538,23 +543,21 @@ def check_matching(
 	for query in queries:
 		matching_vouchers.extend(query.run(as_dict=True))
 
-	return (
-		sorted(matching_vouchers, key=lambda x: x["rank"], reverse=True) if matching_vouchers else []
-	)
+	return sorted(matching_vouchers, key=lambda x: x["rank"], reverse=True) if matching_vouchers else []
 
 
 def get_queries(
 	bank_account,
 	company,
 	transaction,
-	document_types,
-	from_date,
-	to_date,
-	filter_by_reference_date,
-	from_reference_date,
-	to_reference_date,
-	exact_match,
-	common_filters,
+	document_types=None,
+	from_date=None,
+	to_date=None,
+	filter_by_reference_date=None,
+	from_reference_date=None,
+	to_reference_date=None,
+	exact_match=None,
+	common_filters=None,
 ):
 	# get queries to get matching vouchers
 	account_from_to = "paid_to" if transaction.deposit > 0.0 else "paid_from"
@@ -587,15 +590,15 @@ def get_matching_queries(
 	bank_account,
 	company,
 	transaction,
-	document_types,
-	exact_match,
-	account_from_to,
-	from_date,
-	to_date,
-	filter_by_reference_date,
-	from_reference_date,
-	to_reference_date,
-	common_filters,
+	document_types=None,
+	exact_match=None,
+	account_from_to=None,
+	from_date=None,
+	to_date=None,
+	filter_by_reference_date=None,
+	from_reference_date=None,
+	to_reference_date=None,
+	common_filters=None,
 ):
 	queries = []
 	currency = get_account_currency(bank_account)
@@ -654,17 +657,13 @@ def get_bt_matching_query(exact_match, transaction):
 	amount_rank = frappe.qb.terms.Case().when(amount_equality, 1).else_(0)
 	amount_condition = amount_equality if exact_match else getattr(bt, field) > 0.0
 
-	ref_rank = (
-		frappe.qb.terms.Case().when(bt.reference_number == transaction.reference_number, 1).else_(0)
-	)
+	ref_rank = frappe.qb.terms.Case().when(bt.reference_number == transaction.reference_number, 1).else_(0)
 	unallocated_rank = (
 		frappe.qb.terms.Case().when(bt.unallocated_amount == transaction.unallocated_amount, 1).else_(0)
 	)
 
 	party_condition = (
-		(bt.party_type == transaction.party_type)
-		& (bt.party == transaction.party)
-		& bt.party.isnotnull()
+		(bt.party_type == transaction.party_type) & (bt.party == transaction.party) & bt.party.isnotnull()
 	)
 	party_rank = frappe.qb.terms.Case().when(party_condition, 1).else_(0)
 
@@ -716,9 +715,7 @@ def get_pe_matching_query(
 	amount_condition = amount_equality if exact_match else pe.paid_amount > 0.0
 
 	party_condition = (
-		(pe.party_type == transaction.party_type)
-		& (pe.party == transaction.party)
-		& pe.party.isnotnull()
+		(pe.party_type == transaction.party_type) & (pe.party == transaction.party) & pe.party.isnotnull()
 	)
 	party_rank = frappe.qb.terms.Case().when(party_condition, 1).else_(0)
 
@@ -732,7 +729,7 @@ def get_pe_matching_query(
 			(ref_rank + amount_rank + party_rank + 1).as_("rank"),
 			ConstantColumn("Payment Entry").as_("doctype"),
 			pe.name,
-			pe.paid_amount,
+			pe.base_paid_amount_after_tax.as_("paid_amount"),
 			pe.reference_no,
 			pe.reference_date,
 			pe.party,
@@ -749,7 +746,7 @@ def get_pe_matching_query(
 		.orderby(pe.reference_date if cint(filter_by_reference_date) else pe.posting_date)
 	)
 
-	if frappe.flags.auto_reconcile_vouchers == True:
+	if frappe.flags.auto_reconcile_vouchers is True:
 		query = query.where(ref_condition)
 
 	return query
@@ -805,12 +802,11 @@ def get_je_matching_query(
 		.where(je.clearance_date.isnull())
 		.where(jea.account == common_filters.bank_account)
 		.where(amount_equality if exact_match else getattr(jea, amount_field) > 0.0)
-		.where(je.docstatus == 1)
 		.where(filter_by_date)
 		.orderby(je.cheque_date if cint(filter_by_reference_date) else je.posting_date)
 	)
 
-	if frappe.flags.auto_reconcile_vouchers == True:
+	if frappe.flags.auto_reconcile_vouchers is True:
 		query = query.where(ref_condition)
 
 	return query

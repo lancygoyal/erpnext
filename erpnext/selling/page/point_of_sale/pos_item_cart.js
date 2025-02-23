@@ -184,7 +184,7 @@ erpnext.PointOfSale.ItemCart = class {
 		});
 
 		this.$component.on("click", ".checkout-btn", async function () {
-			if ($(this).attr("style").indexOf("--blue-500") == -1) return;
+			if ($(this).attr("style").indexOf("--btn-primary") == -1) return;
 
 			await me.events.checkout();
 			me.toggle_checkout_btn(false);
@@ -389,28 +389,22 @@ erpnext.PointOfSale.ItemCart = class {
 				placeholder: discount ? discount + "%" : __("Enter discount percentage."),
 				input_class: "input-xs",
 				onchange: function () {
-					if (flt(this.value) != 0) {
-						frappe.model.set_value(
-							frm.doc.doctype,
-							frm.doc.name,
-							"additional_discount_percentage",
-							flt(this.value)
-						);
-						me.hide_discount_control(this.value);
-					} else {
-						frappe.model.set_value(
-							frm.doc.doctype,
-							frm.doc.name,
-							"additional_discount_percentage",
-							0
-						);
-						me.$add_discount_elem.css({
-							border: "1px dashed var(--gray-500)",
-							padding: "var(--padding-sm) var(--padding-md)",
+					this.value = flt(this.value);
+					if (this.value > 100) {
+						frappe.msgprint({
+							title: __("Invalid Discount"),
+							indicator: "red",
+							message: __("Discount cannot be greater than 100%."),
 						});
-						me.$add_discount_elem.html(`${me.get_discount_icon()} ${__("Add Discount")}`);
-						me.discount_field = undefined;
+						this.value = 0;
 					}
+					frappe.model.set_value(
+						frm.doc.doctype,
+						frm.doc.name,
+						"additional_discount_percentage",
+						flt(this.value)
+					);
+					me.hide_discount_control(this.value);
 				},
 			},
 			parent: this.$add_discount_elem.find(".add-discount-field"),
@@ -421,9 +415,13 @@ erpnext.PointOfSale.ItemCart = class {
 	}
 
 	hide_discount_control(discount) {
-		if (!discount) {
-			this.$add_discount_elem.css({ padding: "0px", border: "none" });
-			this.$add_discount_elem.html(`<div class="add-discount-field"></div>`);
+		if (!flt(discount)) {
+			this.$add_discount_elem.css({
+				border: "1px dashed var(--gray-500)",
+				padding: "var(--padding-sm) var(--padding-md)",
+			});
+			this.$add_discount_elem.html(`${this.get_discount_icon()} ${__("Add Discount")}`);
+			this.discount_field = undefined;
 		} else {
 			this.$add_discount_elem.css({
 				border: "1px dashed var(--dark-green-500)",
@@ -704,12 +702,14 @@ erpnext.PointOfSale.ItemCart = class {
 		if (toggle) {
 			this.$add_discount_elem.css("display", "flex");
 			this.$cart_container.find(".checkout-btn").css({
-				"background-color": "var(--blue-500)",
+				"background-color": "var(--btn-primary)",
+				color: "var(--neutral)",
 			});
 		} else {
 			this.$add_discount_elem.css("display", "none");
 			this.$cart_container.find(".checkout-btn").css({
-				"background-color": "var(--blue-200)",
+				"background-color": "var(--control-bg)",
+				color: "",
 			});
 		}
 	}
@@ -750,6 +750,7 @@ erpnext.PointOfSale.ItemCart = class {
 				frappe.utils.play_sound("error");
 				return;
 			}
+			this.highlight_numpad_btn($btn, current_action);
 
 			if (first_click_event || field_to_edit_changed) {
 				this.prev_action = current_action;
@@ -795,7 +796,6 @@ erpnext.PointOfSale.ItemCart = class {
 			this.numpad_value = current_action;
 		}
 
-		this.highlight_numpad_btn($btn, current_action);
 		this.events.numpad_event(this.numpad_value, this.prev_action);
 	}
 
@@ -857,7 +857,7 @@ erpnext.PointOfSale.ItemCart = class {
 			});
 			this.$customer_section.find(".customer-details").html(
 				`<div class="header">
-					<div class="label">Contact Details</div>
+					<div class="label">${__("Contact Details")}</div>
 					<div class="close-details-btn">
 						<svg width="32" height="32" viewBox="0 0 14 14" fill="none">
 							<path d="M4.93764 4.93759L7.00003 6.99998M9.06243 9.06238L7.00003 6.99998M7.00003 6.99998L4.93764 9.06238L9.06243 4.93759" stroke="#8D99A6"/>
@@ -877,7 +877,7 @@ erpnext.PointOfSale.ItemCart = class {
 					<div class="loyalty_program-field"></div>
 					<div class="loyalty_points-field"></div>
 				</div>
-				<div class="transactions-label">Recent Transactions</div>`
+				<div class="transactions-label">${__("Recent Transactions")}</div>`
 			);
 			// transactions need to be in diff div from sticky elem for scrolling
 			this.$customer_section.append(`<div class="customer-transactions"></div>`);
@@ -930,9 +930,12 @@ erpnext.PointOfSale.ItemCart = class {
 		const me = this;
 		dfs.forEach((df) => {
 			this[`customer_${df.fieldname}_field`] = frappe.ui.form.make_control({
-				df: { ...df, onchange: handle_customer_field_change },
+				df: df,
 				parent: $customer_form.find(`.${df.fieldname}-field`),
 				render_input: true,
+			});
+			this[`customer_${df.fieldname}_field`].$input?.on("blur", () => {
+				handle_customer_field_change.apply(this[`customer_${df.fieldname}_field`]);
 			});
 			this[`customer_${df.fieldname}_field`].set_value(this.customer_info[df.fieldname]);
 		});
@@ -976,17 +979,19 @@ erpnext.PointOfSale.ItemCart = class {
 
 				if (!res.length) {
 					transaction_container.html(
-						`<div class="no-transactions-placeholder">No recent transactions found</div>`
+						`<div class="no-transactions-placeholder">${__("No recent transactions found")}</div>`
 					);
 					return;
 				}
 
 				const elapsed_time = moment(res[0].posting_date + " " + res[0].posting_time).fromNow();
-				this.$customer_section.find(".customer-desc").html(`Last transacted ${elapsed_time}`);
+				this.$customer_section
+					.find(".customer-desc")
+					.html(`${__("Last transacted")} ${__(elapsed_time)}`);
 
 				res.forEach((invoice) => {
-					const posting_datetime = moment(invoice.posting_date + " " + invoice.posting_time).format(
-						"Do MMMM, h:mma"
+					const posting_datetime = frappe.datetime.str_to_user(
+						invoice.posting_date + " " + invoice.posting_time
 					);
 					let indicator_color = {
 						Paid: "green",
@@ -1007,7 +1012,7 @@ erpnext.PointOfSale.ItemCart = class {
 							</div>
 							<div class="invoice-status">
 								<span class="indicator-pill whitespace-nowrap ${indicator_color[invoice.status]}">
-									<span>${invoice.status}</span>
+									<span>${__(invoice.status)}</span>
 								</span>
 							</div>
 						</div>
@@ -1051,6 +1056,7 @@ erpnext.PointOfSale.ItemCart = class {
 			this.highlight_checkout_btn(false);
 		}
 
+		this.hide_discount_control(frm.doc.additional_discount_percentage);
 		this.update_totals_section(frm);
 
 		if (frm.doc.docstatus === 1) {

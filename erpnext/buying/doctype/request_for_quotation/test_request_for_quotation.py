@@ -5,7 +5,7 @@
 from urllib.parse import urlparse
 
 import frappe
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 from frappe.utils import nowdate
 
 from erpnext.buying.doctype.request_for_quotation.request_for_quotation import (
@@ -21,7 +21,16 @@ from erpnext.stock.doctype.item.test_item import make_item
 from erpnext.templates.pages.rfq import check_supplier_has_docname_access
 
 
-class TestRequestforQuotation(FrappeTestCase):
+class UnitTestRequestForQuotation(UnitTestCase):
+	"""
+	Unit tests for RequestForQuotation.
+	Use this class for testing individual functions and methods.
+	"""
+
+	pass
+
+
+class TestRequestforQuotation(IntegrationTestCase):
 	def test_rfq_qty(self):
 		rfq = make_request_for_quotation(qty=0, do_not_save=True)
 		with self.assertRaises(InvalidQtyError):
@@ -75,9 +84,7 @@ class TestRequestforQuotation(FrappeTestCase):
 
 		rfq = make_request_for_quotation(supplier_data=supplier_wt_appos)
 
-		sq = make_supplier_quotation_from_rfq(
-			rfq.name, for_supplier=supplier_wt_appos[0].get("supplier")
-		)
+		sq = make_supplier_quotation_from_rfq(rfq.name, for_supplier=supplier_wt_appos[0].get("supplier"))
 		sq.submit()
 
 		frappe.form_dict.name = rfq.name
@@ -108,9 +115,7 @@ class TestRequestforQuotation(FrappeTestCase):
 			row = item.append("uoms", {"uom": "Kg", "conversion_factor": 2})
 			row.db_update()
 
-		rfq = make_request_for_quotation(
-			item_code="_Test Multi UOM RFQ Item", uom="Kg", conversion_factor=2
-		)
+		rfq = make_request_for_quotation(item_code="_Test Multi UOM RFQ Item", uom="Kg", conversion_factor=2)
 		rfq.get("items")[0].rate = 100
 		rfq.supplier = rfq.suppliers[0].supplier
 

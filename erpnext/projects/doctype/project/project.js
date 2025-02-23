@@ -45,6 +45,7 @@ frappe.ui.form.on("Project", {
 		frm.set_query("sales_order", function () {
 			var filters = {
 				project: ["in", frm.doc.__islocal ? [""] : [frm.doc.name, ""]],
+				company: frm.doc.company,
 			};
 
 			if (frm.doc.customer) {
@@ -53,6 +54,14 @@ frappe.ui.form.on("Project", {
 
 			return {
 				filters: filters,
+			};
+		});
+
+		frm.set_query("cost_center", () => {
+			return {
+				filters: {
+					company: frm.doc.company,
+				},
 			};
 		});
 	},
@@ -138,27 +147,30 @@ frappe.ui.form.on("Project", {
 	set_project_status_button: function (frm) {
 		frm.add_custom_button(
 			__("Set Project Status"),
-			() => {
-				let d = new frappe.ui.Dialog({
-					title: __("Set Project Status"),
-					fields: [
-						{
-							fieldname: "status",
-							fieldtype: "Select",
-							label: "Status",
-							reqd: 1,
-							options: "Completed\nCancelled",
-						},
-					],
-					primary_action: function () {
-						frm.events.set_status(frm, d.get_values().status);
-						d.hide();
-					},
-					primary_action_label: __("Set Project Status"),
-				}).show();
-			},
+			() => frm.events.get_project_status_dialog(frm).show(),
 			__("Actions")
 		);
+	},
+
+	get_project_status_dialog: function (frm) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Set Project Status"),
+			fields: [
+				{
+					fieldname: "status",
+					fieldtype: "Select",
+					label: "Status",
+					reqd: 1,
+					options: "Completed\nCancelled",
+				},
+			],
+			primary_action: function () {
+				frm.events.set_status(frm, dialog.get_values().status);
+				dialog.hide();
+			},
+			primary_action_label: __("Set Project Status"),
+		});
+		return dialog;
 	},
 
 	create_duplicate: function (frm) {
@@ -179,7 +191,7 @@ frappe.ui.form.on("Project", {
 	},
 
 	set_status: function (frm, status) {
-		frappe.confirm(__("Set Project and all Tasks to status {0}?", [status.bold()]), () => {
+		frappe.confirm(__("Set Project and all Tasks to status {0}?", [__(status).bold()]), () => {
 			frappe
 				.xcall("erpnext.projects.doctype.project.project.set_project_status", {
 					project: frm.doc.name,

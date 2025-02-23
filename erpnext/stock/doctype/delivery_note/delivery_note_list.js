@@ -30,12 +30,6 @@ frappe.listview_settings["Delivery Note"] = {
 			const docnames = doclist.get_checked_items(true);
 
 			if (selected_docs.length > 0) {
-				for (let doc of selected_docs) {
-					if (!doc.docstatus) {
-						frappe.throw(__("Cannot create a Delivery Trip from Draft documents."));
-					}
-				}
-
 				frappe.new_doc("Delivery Trip").then(() => {
 					// Empty out the child table before inserting new ones
 					cur_frm.set_value("delivery_stops", []);
@@ -63,16 +57,20 @@ frappe.listview_settings["Delivery Note"] = {
 			}
 		};
 
-		// doclist.page.add_actions_menu_item(__('Create Delivery Trip'), action, false);
+		if (frappe.model.can_create("Delivery Trip")) {
+			doclist.page.add_action_item(__("Create Delivery Trip"), action);
+		}
 
-		doclist.page.add_action_item(__("Create Delivery Trip"), action);
+		if (frappe.model.can_create("Sales Invoice")) {
+			doclist.page.add_action_item(__("Sales Invoice"), () => {
+				erpnext.bulk_transaction_processing.create(doclist, "Delivery Note", "Sales Invoice");
+			});
+		}
 
-		doclist.page.add_action_item(__("Sales Invoice"), () => {
-			erpnext.bulk_transaction_processing.create(doclist, "Delivery Note", "Sales Invoice");
-		});
-
-		doclist.page.add_action_item(__("Packaging Slip From Delivery Note"), () => {
-			erpnext.bulk_transaction_processing.create(doclist, "Delivery Note", "Packing Slip");
-		});
+		if (frappe.model.can_create("Packing Slip")) {
+			doclist.page.add_action_item(__("Packaging Slip From Delivery Note"), () => {
+				erpnext.bulk_transaction_processing.create(doclist, "Delivery Note", "Packing Slip");
+			});
+		}
 	},
 };

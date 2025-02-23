@@ -15,6 +15,9 @@ frappe.ui.form.on("Item", {
 		frm.add_fetch("tax_type", "tax_rate", "tax_rate");
 
 		frm.make_methods = {
+			Quotation: () => {
+				open_form(frm, "Quotation", "Quotation Item", "items");
+			},
 			"Sales Order": () => {
 				open_form(frm, "Sales Order", "Sales Order Item", "items");
 			},
@@ -542,11 +545,30 @@ $.extend(erpnext.item, {
 
 		function make_fields_from_attribute_values(attr_dict) {
 			let fields = [];
-			Object.keys(attr_dict).forEach((name, i) => {
+			let att_key = frm.doc.attributes.map((idx) => idx.attribute);
+			att_key.forEach((name, i) => {
 				if (i % 3 === 0) {
 					fields.push({ fieldtype: "Section Break" });
 				}
 				fields.push({ fieldtype: "Column Break", label: name });
+				fields.push({
+					fieldtype: "Data",
+					placeholder: "Search",
+					fieldname: `search_${frappe.scrub(name)}`,
+					onchange: function (e) {
+						let value = e.target.value;
+						let result = attr_dict[name].filter((attr_value) =>
+							attr_value.toString().toLowerCase().includes(value.toLowerCase())
+						);
+						attr_dict[name].forEach((attr_value) => {
+							if (result.includes(attr_value)) {
+								me.multiple_variant_dialog.set_df_property(attr_value, "hidden", 0);
+							} else {
+								me.multiple_variant_dialog.set_df_property(attr_value, "hidden", 1);
+							}
+						});
+					},
+				});
 				attr_dict[name].forEach((value) => {
 					fields.push({
 						fieldtype: "Check",
@@ -584,6 +606,14 @@ $.extend(erpnext.item, {
 			me.multiple_variant_dialog = new frappe.ui.Dialog({
 				title: __("Select Attribute Values"),
 				fields: [
+					frm.doc.image
+						? {
+								fieldtype: "Check",
+								label: __("Create a variant with the template image."),
+								fieldname: "use_template_image",
+								default: 0,
+						  }
+						: null,
 					{
 						fieldtype: "HTML",
 						fieldname: "help",
@@ -591,11 +621,14 @@ $.extend(erpnext.item, {
 							${__("Select at least one value from each of the attributes.")}
 						</label>`,
 					},
-				].concat(fields),
+				]
+					.concat(fields)
+					.filter(Boolean),
 			});
 
 			me.multiple_variant_dialog.set_primary_action(__("Create Variants"), () => {
 				let selected_attributes = get_selected_attributes();
+				let use_template_image = me.multiple_variant_dialog.get_value("use_template_image");
 
 				me.multiple_variant_dialog.hide();
 				frappe.call({
@@ -603,6 +636,7 @@ $.extend(erpnext.item, {
 					args: {
 						item: frm.doc.name,
 						args: selected_attributes,
+						use_template_image: use_template_image,
 					},
 					callback: function (r) {
 						if (r.message === "queued") {
@@ -628,6 +662,10 @@ $.extend(erpnext.item, {
 			me.multiple_variant_dialog.disable_primary_action();
 			me.multiple_variant_dialog.clear();
 			me.multiple_variant_dialog.show();
+			me.multiple_variant_dialog.$wrapper
+				.find("div[data-fieldname^='search_']")
+				.find(".clearfix")
+				.hide();
 		}
 
 		function get_selected_attributes() {
@@ -648,39 +686,41 @@ $.extend(erpnext.item, {
 		}
 
 		frm.doc.attributes.forEach(function (d) {
-			let p = new Promise((resolve) => {
-				if (!d.numeric_values) {
-					frappe
-						.call({
-							method: "frappe.client.get_list",
-							args: {
-								doctype: "Item Attribute Value",
-								filters: [["parent", "=", d.attribute]],
-								fields: ["attribute_value"],
-								limit_page_length: 0,
-								parent: "Item Attribute",
-								order_by: "idx",
-							},
-						})
-						.then((r) => {
-							if (r.message) {
-								attr_val_fields[d.attribute] = r.message.map(function (d) {
-									return d.attribute_value;
-								});
-								resolve();
-							}
-						});
-				} else {
-					let values = [];
-					for (var i = d.from_range; i <= d.to_range; i = flt(i + d.increment, 6)) {
-						values.push(i);
+			if (!d.disabled) {
+				let p = new Promise((resolve) => {
+					if (!d.numeric_values) {
+						frappe
+							.call({
+								method: "frappe.client.get_list",
+								args: {
+									doctype: "Item Attribute Value",
+									filters: [["parent", "=", d.attribute]],
+									fields: ["attribute_value"],
+									limit_page_length: 0,
+									parent: "Item Attribute",
+									order_by: "idx",
+								},
+							})
+							.then((r) => {
+								if (r.message) {
+									attr_val_fields[d.attribute] = r.message.map(function (d) {
+										return d.attribute_value;
+									});
+									resolve();
+								}
+							});
+					} else {
+						let values = [];
+						for (var i = d.from_range; i <= d.to_range; i = flt(i + d.increment, 6)) {
+							values.push(i);
+						}
+						attr_val_fields[d.attribute] = values;
+						resolve();
 					}
-					attr_val_fields[d.attribute] = values;
-					resolve();
-				}
-			});
+				});
 
-			promises.push(p);
+				promises.push(p);
+			}
 		}, this);
 
 		Promise.all(promises).then(() => {
@@ -695,25 +735,37 @@ $.extend(erpnext.item, {
 		for (var i = 0; i < frm.doc.attributes.length; i++) {
 			var fieldtype, desc;
 			var row = frm.doc.attributes[i];
-			if (row.numeric_values) {
-				fieldtype = "Float";
-				desc =
-					"Min Value: " +
-					row.from_range +
-					" , Max Value: " +
-					row.to_range +
-					", in Increments of: " +
-					row.increment;
-			} else {
-				fieldtype = "Data";
-				desc = "";
+
+			if (!row.disabled) {
+				if (row.numeric_values) {
+					fieldtype = "Float";
+					desc =
+						"Min Value: " +
+						row.from_range +
+						" , Max Value: " +
+						row.to_range +
+						", in Increments of: " +
+						row.increment;
+				} else {
+					fieldtype = "Data";
+					desc = "";
+				}
+				fields = fields.concat({
+					label: row.attribute,
+					fieldname: row.attribute,
+					fieldtype: fieldtype,
+					reqd: 0,
+					description: desc,
+				});
 			}
-			fields = fields.concat({
-				label: row.attribute,
-				fieldname: row.attribute,
-				fieldtype: fieldtype,
-				reqd: 0,
-				description: desc,
+		}
+
+		if (frm.doc.image) {
+			fields.push({
+				fieldtype: "Check",
+				label: __("Create a variant with the template image."),
+				fieldname: "use_template_image",
+				default: 0,
 			});
 		}
 
@@ -758,6 +810,7 @@ $.extend(erpnext.item, {
 							args: {
 								item: frm.doc.name,
 								args: d.get_values(),
+								use_template_image: args.use_template_image,
 							},
 							callback: function (r) {
 								var doclist = frappe.model.sync(r.message);

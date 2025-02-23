@@ -4,7 +4,10 @@
 import frappe
 from frappe import _
 
-from erpnext.accounts.doctype.payment_request.payment_request import get_amount
+from erpnext.accounts.doctype.payment_request.payment_request import (
+	ALLOWED_DOCTYPES_FOR_PAYMENT_REQUEST,
+	get_amount,
+)
 
 
 def get_context(context):
@@ -36,9 +39,7 @@ def get_context(context):
 	context.available_loyalty_points = 0.0
 	if context.doc.get("customer"):
 		# check for the loyalty program of the customer
-		customer_loyalty_program = frappe.db.get_value(
-			"Customer", context.doc.customer, "loyalty_program"
-		)
+		customer_loyalty_program = frappe.db.get_value("Customer", context.doc.customer, "loyalty_program")
 
 		if customer_loyalty_program:
 			from erpnext.accounts.doctype.loyalty_program.loyalty_program import (
@@ -67,10 +68,15 @@ def get_attachments(dt, dn):
 
 def get_payment_details(doc):
 	show_pay_button, amount = (
-		"payments" in frappe.get_installed_apps()
-		and frappe.db.get_single_value("Buying Settings", "show_pay_button")
-	), 0
+		(
+			"payments" in frappe.get_installed_apps()
+			and frappe.db.get_single_value("Buying Settings", "show_pay_button")
+			and doc.doctype in ALLOWED_DOCTYPES_FOR_PAYMENT_REQUEST
+		),
+		0,
+	)
 	if not show_pay_button:
 		return show_pay_button, amount
+
 	amount = get_amount(doc)
 	return bool(amount), amount

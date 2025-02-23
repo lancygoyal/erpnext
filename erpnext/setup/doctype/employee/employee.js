@@ -18,18 +18,6 @@ erpnext.setup.EmployeeController = class EmployeeController extends frappe.ui.fo
 	refresh() {
 		erpnext.toggle_naming_series();
 	}
-
-	salutation() {
-		if (this.frm.doc.salutation) {
-			this.frm.set_value(
-				"gender",
-				{
-					Mr: "Male",
-					Ms: "Female",
-				}[this.frm.doc.salutation]
-			);
-		}
-	}
 };
 
 frappe.ui.form.on("Employee", {
@@ -42,6 +30,11 @@ frappe.ui.form.on("Employee", {
 			};
 		});
 	},
+
+	refresh: function (frm) {
+		frm.fields_dict.date_of_birth.datepicker.update({ maxDate: new Date() });
+	},
+
 	prefered_contact_email: function (frm) {
 		frm.events.update_contact(frm);
 	},

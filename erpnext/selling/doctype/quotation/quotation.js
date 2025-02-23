@@ -24,20 +24,6 @@ frappe.ui.form.on("Quotation", {
 		frm.set_df_property("packed_items", "cannot_add_rows", true);
 		frm.set_df_property("packed_items", "cannot_delete_rows", true);
 
-		frm.set_query("company_address", function (doc) {
-			if (!doc.company) {
-				frappe.throw(__("Please set Company"));
-			}
-
-			return {
-				query: "frappe.contacts.doctype.address.address.address_query",
-				filters: {
-					link_doctype: "Company",
-					link_name: doc.company,
-				},
-			};
-		});
-
 		frm.set_query("serial_and_batch_bundle", "packed_items", (doc, cdt, cdn) => {
 			let row = locals[cdt][cdn];
 			return {
@@ -71,6 +57,8 @@ frappe.ui.form.on("Quotation", {
 		frm.trigger("set_label");
 		frm.trigger("toggle_reqd_lead_customer");
 		frm.trigger("set_dynamic_field_label");
+		// frm.set_value("party_name", ""); // removed to set party_name from url for crm integration
+		frm.set_value("customer_name", "");
 	},
 
 	set_label: function (frm) {
@@ -97,7 +85,7 @@ erpnext.selling.QuotationController = class QuotationController extends erpnext.
 		frappe.dynamic_link = {
 			doc: this.frm.doc,
 			fieldname: "party_name",
-			doctype: doc.quotation_to == "Customer" ? "Customer" : "Lead",
+			doctype: doc.quotation_to,
 		};
 
 		var me = this;
@@ -197,6 +185,7 @@ erpnext.selling.QuotationController = class QuotationController extends erpnext.
 			};
 		} else if (this.frm.doc.quotation_to == "Prospect") {
 			this.frm.set_df_property("party_name", "label", "Prospect");
+			this.frm.fields_dict.party_name.get_query = null;
 		}
 	}
 
@@ -363,6 +352,26 @@ erpnext.selling.QuotationController = class QuotationController extends erpnext.
 			</p>`
 		);
 		dialog.show();
+	}
+
+	currency() {
+		super.currency();
+		let me = this;
+		const company_currency = this.get_company_currency();
+		if (this.frm.doc.currency && this.frm.doc.currency !== company_currency) {
+			this.get_exchange_rate(
+				this.frm.doc.transaction_date,
+				this.frm.doc.currency,
+				company_currency,
+				function (exchange_rate) {
+					if (exchange_rate != me.frm.doc.conversion_rate) {
+						me.set_margin_amount_based_on_currency(exchange_rate);
+						me.set_actual_charges_based_on_currency(exchange_rate);
+						me.frm.set_value("conversion_rate", exchange_rate);
+					}
+				}
+			);
+		}
 	}
 };
 

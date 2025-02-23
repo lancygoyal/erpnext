@@ -2,19 +2,20 @@ import unittest
 from functools import partial
 
 import frappe
+from frappe.tests import IntegrationTestCase
 
 from erpnext.controllers import queries
 
 
 def add_default_params(func, doctype):
-	return partial(
-		func, doctype=doctype, txt="", searchfield="name", start=0, page_len=20, filters=None
-	)
+	return partial(func, doctype=doctype, txt="", searchfield="name", start=0, page_len=20, filters=None)
 
 
-class TestQueries(unittest.TestCase):
+EXTRA_TEST_RECORD_DEPENDENCIES = ["Employee", "Lead", "Item", "BOM", "Project", "Account"]
 
-	# All tests are based on doctype/test_records.json
+
+class TestQueries(IntegrationTestCase):
+	# All tests are based on self.globalTestRecords[doctype]
 
 	def assert_nested_in(self, item, container):
 		self.assertIn(item, [vals for tuples in container for vals in tuples])

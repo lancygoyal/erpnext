@@ -19,6 +19,20 @@ frappe.ui.form.on("BOM", {
 			};
 		});
 
+		frm.set_query("bom_no", "operations", function (doc, cdt, cdn) {
+			let row = locals[cdt][cdn];
+			return {
+				query: "erpnext.controllers.queries.bom",
+				filters: {
+					currency: frm.doc.currency,
+					company: frm.doc.company,
+					item: row.finished_good,
+					is_active: 1,
+					docstatus: 1,
+				},
+			};
+		});
+
 		frm.set_query("source_warehouse", "items", function () {
 			return {
 				filters: {
@@ -85,6 +99,27 @@ frappe.ui.form.on("BOM", {
 		frm.get_field("items").grid.set_multiple_add("item_code", "qty");
 	},
 
+	default_source_warehouse(frm) {
+		if (frm.doc.default_source_warehouse) {
+			frm.doc.operations.forEach((d) => {
+				frappe.model.set_value(
+					d.doctype,
+					d.name,
+					"source_warehouse",
+					frm.doc.default_source_warehouse
+				);
+			});
+		}
+	},
+
+	default_target_warehouse(frm) {
+		if (frm.doc.default_source_warehouse) {
+			frm.doc.operations.forEach((d) => {
+				frappe.model.set_value(d.doctype, d.name, "fg_warehouse", frm.doc.default_target_warehouse);
+			});
+		}
+	},
+
 	refresh(frm) {
 		frm.toggle_enable("item", frm.doc.__islocal);
 
@@ -96,22 +131,35 @@ frappe.ui.form.on("BOM", {
 		});
 
 		if (!frm.is_new() && frm.doc.docstatus < 2) {
-			frm.add_custom_button(__("Update Cost"), function () {
-				frm.events.update_cost(frm, true);
-			});
-			frm.add_custom_button(__("Browse BOM"), function () {
-				frappe.route_options = {
-					bom: frm.doc.name,
-				};
-				frappe.set_route("Tree", "BOM");
-			});
+			frm.add_custom_button(
+				__("Update Cost"),
+				function () {
+					frm.events.update_cost(frm, true);
+				},
+				__("Actions")
+			);
+
+			frm.add_custom_button(
+				__("Browse BOM"),
+				function () {
+					frappe.route_options = {
+						bom: frm.doc.name,
+					};
+					frappe.set_route("Tree", "BOM");
+				},
+				__("Actions")
+			);
 		}
 
 		if (!frm.is_new() && !frm.doc.docstatus == 0) {
-			frm.add_custom_button(__("New Version"), function () {
-				let new_bom = frappe.model.copy_doc(frm.doc);
-				frappe.set_route("Form", "BOM", new_bom.name);
-			});
+			frm.add_custom_button(
+				__("New Version"),
+				function () {
+					let new_bom = frappe.model.copy_doc(frm.doc);
+					frappe.set_route("Form", "BOM", new_bom.name);
+				},
+				__("Actions")
+			);
 		}
 
 		if (frm.doc.docstatus == 1) {
@@ -182,25 +230,30 @@ frappe.ui.form.on("BOM", {
 	},
 
 	make_work_order(frm) {
-		frm.events.setup_variant_prompt(frm, "Work Order", (frm, item, data, variant_items) => {
-			frappe.call({
-				method: "erpnext.manufacturing.doctype.work_order.work_order.make_work_order",
-				args: {
-					bom_no: frm.doc.name,
-					item: item,
-					qty: data.qty || 0.0,
-					project: frm.doc.project,
-					variant_items: variant_items,
-				},
-				freeze: true,
-				callback(r) {
-					if (r.message) {
-						let doc = frappe.model.sync(r.message)[0];
-						frappe.set_route("Form", doc.doctype, doc.name);
-					}
-				},
-			});
-		});
+		frm.events.setup_variant_prompt(
+			frm,
+			"Work Order",
+			(frm, item, data, variant_items, use_multi_level_bom) => {
+				frappe.call({
+					method: "erpnext.manufacturing.doctype.work_order.work_order.make_work_order",
+					args: {
+						bom_no: frm.doc.name,
+						item: item,
+						qty: data.qty || 0.0,
+						project: frm.doc.project,
+						variant_items: variant_items,
+						use_multi_level_bom: use_multi_level_bom,
+					},
+					freeze: true,
+					callback(r) {
+						if (r.message) {
+							let doc = frappe.model.sync(r.message)[0];
+							frappe.set_route("Form", doc.doctype, doc.name);
+						}
+					},
+				});
+			}
+		);
 	},
 
 	make_variant_bom(frm) {
@@ -277,6 +330,13 @@ frappe.ui.form.on("BOM", {
 					cur_dialog.refresh();
 				},
 			});
+
+			fields.push({
+				fieldtype: "Check",
+				label: __("Use Multi-Level BOM"),
+				fieldname: "use_multi_level_bom",
+				default: frm.doc?.__onload.use_multi_level_bom,
+			});
 		}
 
 		var has_template_rm = frm.doc.items.filter((d) => d.has_variants === 1) || [];
@@ -285,6 +345,7 @@ frappe.ui.form.on("BOM", {
 				fieldname: "items",
 				fieldtype: "Table",
 				label: __("Raw Materials"),
+				depends_on: "eval:!doc.use_multi_level_bom",
 				fields: [
 					{
 						fieldname: "item_code",
@@ -293,6 +354,13 @@ frappe.ui.form.on("BOM", {
 						fieldtype: "Link",
 						in_list_view: 1,
 						reqd: 1,
+						get_query() {
+							return {
+								filters: {
+									has_variants: 1,
+								},
+							};
+						},
 					},
 					{
 						fieldname: "variant_item_code",
@@ -312,6 +380,13 @@ frappe.ui.form.on("BOM", {
 									variant_of: data.item_code,
 								},
 							};
+						},
+						change() {
+							let doc = this.doc;
+							if (!doc.qty) {
+								doc.qty = 1.0;
+								this.grid.set_value("qty", 1.0, doc);
+							}
 						},
 					},
 					{
@@ -347,14 +422,15 @@ frappe.ui.form.on("BOM", {
 			(data) => {
 				let item = data.item || frm.doc.item;
 				let variant_items = data.items || [];
+				let use_multi_level_bom = data.use_multi_level_bom || 0;
 
 				variant_items.forEach((d) => {
-					if (!d.variant_item_code) {
+					if (!d.variant_item_code && !use_multi_level_bom) {
 						frappe.throw(__("Select variant item code for the template item {0}", [d.item_code]));
 					}
 				});
 
-				callback(frm, item, data, variant_items);
+				callback(frm, item, data, variant_items, use_multi_level_bom);
 			},
 			__(title),
 			__("Create")
@@ -364,7 +440,7 @@ frappe.ui.form.on("BOM", {
 			dialog.fields_dict.items.df.data.push({
 				item_code: d.item_code,
 				variant_item_code: "",
-				qty: d.qty,
+				qty: (d.qty / frm.doc.quantity) * (dialog.fields_dict.qty.value || 1),
 				source_warehouse: d.source_warehouse,
 				operation: d.operation,
 			});
@@ -429,6 +505,28 @@ frappe.ui.form.on("BOM", {
 		}
 
 		frm.set_value("process_loss_qty", qty);
+	},
+});
+
+frappe.ui.form.on("BOM Operation", {
+	bom_no(frm, cdt, cdn) {
+		let row = locals[cdt][cdn];
+
+		if (row.bom_no && row.finished_good) {
+			frappe.call({
+				method: "add_materials_from_bom",
+				doc: frm.doc,
+				args: {
+					finished_good: row.finished_good,
+					bom_no: row.bom_no,
+					operation_row_id: row.idx,
+					qty: row.finished_good_qty,
+				},
+				callback(r) {
+					refresh_field("items");
+				},
+			});
+		}
 	},
 });
 
@@ -801,3 +899,88 @@ function trigger_process_loss_qty_prompt(frm, cdt, cdn, item_code) {
 		__("Set Quantity")
 	);
 }
+
+frappe.ui.form.on("BOM Operation", {
+	add_raw_materials(frm, cdt, cdn) {
+		let row = locals[cdt][cdn];
+		frm.events._prompt_for_raw_materials(frm, row);
+	},
+});
+
+frappe.ui.form.on("BOM", {
+	_prompt_for_raw_materials(frm, row) {
+		let fields = frm.events.get_fields_for_prompt(frm, row);
+		frm._bom_rm_dialog = new frappe.ui.Dialog({
+			title: __("Add Raw Materials"),
+			fields: fields,
+			primary_action_label: __("Add"),
+			primary_action: () => {
+				let values = frm._bom_rm_dialog.get_values();
+				if (values) {
+					frm.events._add_raw_materials(frm, values);
+					frm._bom_rm_dialog.hide();
+				}
+			},
+		});
+
+		frm._bom_rm_dialog.show();
+	},
+
+	get_fields_for_prompt(frm, row) {
+		return [
+			{
+				label: __("Raw Materials"),
+				fieldname: "items",
+				fieldtype: "Table",
+				reqd: 1,
+				fields: [
+					{
+						label: __("Item"),
+						fieldname: "item_code",
+						fieldtype: "Link",
+						options: "Item",
+						reqd: 1,
+						in_list_view: 1,
+						change() {
+							let doc = this.doc;
+							doc.qty = 1.0;
+							this.grid.set_value("qty", 1.0, doc);
+						},
+						get_query() {
+							return {
+								filters: {
+									name: ["!=", row.finished_good],
+								},
+							};
+						},
+					},
+					{
+						label: __("Qty"),
+						fieldname: "qty",
+						default: 1.0,
+						fieldtype: "Float",
+						reqd: 1,
+						in_list_view: 1,
+					},
+				],
+			},
+			{
+				fieldname: "operation_row_id",
+				fieldtype: "Data",
+				hidden: 1,
+				default: row.idx,
+			},
+		];
+	},
+
+	_add_raw_materials(frm, values) {
+		frm.call({
+			method: "add_raw_materials",
+			doc: frm.doc,
+			args: {
+				operation_row_id: values.operation_row_id,
+				items: values.items,
+			},
+		});
+	},
+});

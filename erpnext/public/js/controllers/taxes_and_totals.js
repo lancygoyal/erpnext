@@ -128,7 +128,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 	calculate_item_values() {
 		var me = this;
 		if (!this.discount_amount_applied) {
-			for (const item of this.frm._items || []) {
+			for (const item of this.frm.doc.items || []) {
 				frappe.model.round_floats_in(item);
 				item.net_rate = item.rate;
 				item.qty = item.qty === undefined ? (me.frm.doc.is_return ? -1 : 1) : item.qty;
@@ -210,10 +210,12 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 			});
 		}
 
-		frappe.db.get_single_value("Accounts Settings", "round_row_wise_tax")
-			.then((round_row_wise_tax) => {
-				frappe.flags.round_row_wise_tax = round_row_wise_tax;
-			})
+		frappe.call({
+			method: "erpnext.controllers.taxes_and_totals.get_rounding_tax_settings",
+			callback: function(r) {
+				frappe.flags.round_off_settings = r.message;
+			}
+		});
 	}
 
 	determine_exclusive_rate() {
@@ -225,7 +227,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 		});
 		if(has_inclusive_tax==false) return;
 
-		$.each(me.frm._items || [], function(n, item) {
+		$.each(this.frm.doc.items || [], function(n, item) {
 			var item_tax_map = me._load_item_tax_rate(item.item_tax_rate);
 			var cumulated_tax_fraction = 0.0;
 			var total_inclusive_tax_amount_per_qty = 0;
@@ -334,6 +336,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 					child.charge_type = "On Net Total";
 					child.account_head = tax;
 					child.rate = 0;
+					child.set_by_item_tax_template = true;
 				}
 			});
 		}
@@ -445,6 +448,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 	get_current_tax_amount(item, tax, item_tax_map) {
 		var tax_rate = this._get_tax_rate(tax, item_tax_map);
 		var current_tax_amount = 0.0;
+		var current_net_amount = 0.0;
 
 		// To set row_id by default as previous row.
 		if(["On Previous Row Amount", "On Previous Row Total"].includes(tax.charge_type)) {
@@ -457,32 +461,38 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 			}
 		}
 		if(tax.charge_type == "Actual") {
+			current_net_amount = item.net_amount
 			// distribute the tax amount proportionally to each item row
 			var actual = flt(tax.tax_amount, precision("tax_amount", tax));
 			current_tax_amount = this.frm.doc.net_total ?
 				((item.net_amount / this.frm.doc.net_total) * actual) : 0.0;
 
 		} else if(tax.charge_type == "On Net Total") {
+			if (tax.account_head in item_tax_map) {
+				current_net_amount = item.net_amount
+			};
 			current_tax_amount = (tax_rate / 100.0) * item.net_amount;
 		} else if(tax.charge_type == "On Previous Row Amount") {
+			current_net_amount = this.frm.doc["taxes"][cint(tax.row_id) - 1].tax_amount_for_current_item
 			current_tax_amount = (tax_rate / 100.0) *
 				this.frm.doc["taxes"][cint(tax.row_id) - 1].tax_amount_for_current_item;
-
 		} else if(tax.charge_type == "On Previous Row Total") {
+			current_net_amount = this.frm.doc["taxes"][cint(tax.row_id) - 1].grand_total_for_current_item
 			current_tax_amount = (tax_rate / 100.0) *
 				this.frm.doc["taxes"][cint(tax.row_id) - 1].grand_total_for_current_item;
 		} else if (tax.charge_type == "On Item Quantity") {
+			// don't sum current net amount due to the field being a currency field
 			current_tax_amount = tax_rate * item.qty;
 		}
 
 		if (!tax.dont_recompute_tax) {
-			this.set_item_wise_tax(item, tax, tax_rate, current_tax_amount);
+			this.set_item_wise_tax(item, tax, tax_rate, current_tax_amount, current_net_amount);
 		}
 
 		return current_tax_amount;
 	}
 
-	set_item_wise_tax(item, tax, tax_rate, current_tax_amount) {
+	set_item_wise_tax(item, tax, tax_rate, current_tax_amount, current_net_amount) {
 		// store tax breakup for each item
 		let tax_detail = tax.item_wise_tax_detail;
 		let key = item.item_code || item.item_name;
@@ -493,17 +503,24 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 		}
 
 		let item_wise_tax_amount = current_tax_amount * this.frm.doc.conversion_rate;
+		let item_wise_net_amount = current_net_amount * this.frm.doc.conversion_rate;
 		if (frappe.flags.round_row_wise_tax) {
 			item_wise_tax_amount = flt(item_wise_tax_amount, precision("tax_amount", tax));
+			item_wise_net_amount = flt(item_wise_net_amount, precision("net_amount", tax));
 			if (tax_detail && tax_detail[key]) {
-				item_wise_tax_amount += flt(tax_detail[key][1], precision("tax_amount", tax));
+				item_wise_tax_amount += flt(tax_detail[key].tax_amount, precision("tax_amount", tax));
+				item_wise_net_amount += flt(tax_detail[key].net_amount, precision("net_amount", tax));
 			}
-		} else {
-			if (tax_detail && tax_detail[key])
-				item_wise_tax_amount += tax_detail[key][1];
+		} else if (tax_detail && tax_detail[key]) {
+			item_wise_tax_amount += tax_detail[key].tax_amount;
+			item_wise_net_amount += tax_detail[key].net_amount;
 		}
 
-		tax_detail[key] = [tax_rate, flt(item_wise_tax_amount, precision("base_tax_amount", tax))];
+		tax_detail[key] = {
+			tax_rate: tax_rate,
+			tax_amount: flt(item_wise_tax_amount, precision("base_tax_amount", tax)),
+			net_amount: flt(item_wise_net_amount, precision("base_net_amount", tax)),
+		};
 	}
 
 	round_off_totals(tax) {
@@ -641,7 +658,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 
 	_cleanup() {
 		this.frm.doc.base_in_words = this.frm.doc.in_words = "";
-		let items = this.frm._items;
+		let items = this.frm.doc.items;
 
 		if(items && items.length) {
 			if(!frappe.meta.get_docfield(items[0].doctype, "item_tax_amount", this.frm.doctype)) {
@@ -821,7 +838,7 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 		}
 	}
 
-	set_total_amount_to_default_mop() {
+	async set_total_amount_to_default_mop() {
 		let grand_total = this.frm.doc.rounded_total || this.frm.doc.grand_total;
 		let base_grand_total = this.frm.doc.base_rounded_total || this.frm.doc.base_grand_total;
 
@@ -843,21 +860,66 @@ erpnext.taxes_and_totals = class TaxesAndTotals extends erpnext.payments {
 			);
 		}
 
-		if(!this.frm.doc.is_return){
-			this.frm.doc.payments.find(payment => {
-				if (payment.default) {
+		/*
+		During returns, if an user select mode of payment other than
+		default mode of payment, it should retain the user selection
+		instead resetting it to default mode of payment.
+		*/
+
+		let payment_amount = 0;
+		this.frm.doc.payments.forEach(payment => {
+			payment_amount += payment.amount
+		});
+
+		if (payment_amount == total_amount_to_pay) {
+			return;
+		}
+
+		/*
+		For partial return, if the payment was made using single mode of payment
+		it should set the return to that mode of payment only.
+		*/
+
+		let return_against_mop = await frappe.call({
+			method: 'erpnext.controllers.sales_and_purchase_return.get_payment_data',
+			args: {
+				invoice: this.frm.doc.return_against
+			}
+		});
+
+		if (return_against_mop.message.length === 1) {
+			this.frm.doc.payments.forEach(payment => {
+				if (payment.mode_of_payment == return_against_mop.message[0].mode_of_payment) {
 					payment.amount = total_amount_to_pay;
+				} else {
+					payment.amount = 0;
 				}
 			});
+			this.frm.refresh_fields();
+			return;
 		}
+
+		this.frm.doc.payments.find(payment => {
+			if (payment.default) {
+				payment.amount = total_amount_to_pay;
+			} else {
+				payment.amount = 0
+			}
+		});
 
 		this.frm.refresh_fields();
 	}
 
-	set_default_payment(total_amount_to_pay, update_paid_amount) {
+	async set_default_payment(total_amount_to_pay, update_paid_amount) {
 		var me = this;
 		var payment_status = true;
 		if(this.frm.doc.is_pos && (update_paid_amount===undefined || update_paid_amount)) {
+			let r = await frappe.db.get_value("POS Profile", this.frm.doc.pos_profile, "disable_grand_total_to_default_mop");
+
+			if (r.message.disable_grand_total_to_default_mop) {
+				return;
+			}
+
 			$.each(this.frm.doc['payments'] || [], function(index, data) {
 				if(data.default && payment_status && total_amount_to_pay > 0) {
 					let base_amount, amount;

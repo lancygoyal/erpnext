@@ -12,6 +12,7 @@ erpnext.buying.setup_buying_controller();
 
 frappe.ui.form.on("Purchase Order", {
 	setup: function (frm) {
+		frm.ignore_doctypes_on_cancel_all = ["Unreconcile Payment", "Unreconcile Payment Entries"];
 		if (frm.doc.is_old_subcontracting_flow) {
 			frm.set_query("reserve_warehouse", "supplied_items", function () {
 				return {
@@ -64,10 +65,35 @@ frappe.ui.form.on("Purchase Order", {
 		}
 	},
 
+	supplier: function (frm) {
+		// Do not update if inter company reference is there as the details will already be updated
+		if (frm.updating_party_details || frm.doc.inter_company_invoice_reference) return;
+
+		if (frm.doc.__onload && frm.doc.__onload.load_after_mapping) return;
+
+		erpnext.utils.get_party_details(
+			frm,
+			"erpnext.accounts.party.get_party_details",
+			{
+				posting_date: frm.doc.transaction_date,
+				bill_date: frm.doc.bill_date,
+				party: frm.doc.supplier,
+				party_type: "Supplier",
+				account: frm.doc.credit_to,
+				price_list: frm.doc.buying_price_list,
+				fetch_payment_terms_template: cint(!frm.doc.ignore_default_payment_terms_template),
+			},
+			function () {
+				frm.set_df_property("apply_tds", "read_only", frm.supplier_tds ? 0 : 1);
+				frm.set_df_property("tax_withholding_category", "hidden", frm.supplier_tds ? 0 : 1);
+			}
+		);
+	},
+
 	get_materials_from_supplier: function (frm) {
 		let po_details = [];
 
-		if (frm.doc.supplied_items && (flt(frm.doc.per_received, 2) == 100 || frm.doc.status === "Closed")) {
+		if (frm.doc.supplied_items && (flt(frm.doc.per_received) == 100 || frm.doc.status === "Closed")) {
 			frm.doc.supplied_items.forEach((d) => {
 				if (d.total_supplied_qty && d.total_supplied_qty != d.consumed_qty) {
 					po_details.push(d.name);
@@ -105,6 +131,15 @@ frappe.ui.form.on("Purchase Order", {
 		set_schedule_date(frm);
 		if (!frm.doc.transaction_date) {
 			frm.set_value("transaction_date", frappe.datetime.get_today());
+		}
+
+		if (frm.doc.__onload && frm.doc.supplier) {
+			if (frm.is_new()) {
+				frm.doc.apply_tds = frm.doc.__onload.supplier_tds ? 1 : 0;
+			}
+			if (!frm.doc.__onload.supplier_tds) {
+				frm.set_df_property("apply_tds", "read_only", 1);
+			}
 		}
 
 		erpnext.queries.setup_queries(frm, "Warehouse", function () {
@@ -294,8 +329,8 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 			if (!["Closed", "Delivered"].includes(doc.status)) {
 				if (
 					this.frm.doc.status !== "Closed" &&
-					flt(this.frm.doc.per_received, 2) < 100 &&
-					flt(this.frm.doc.per_billed, 2) < 100
+					flt(this.frm.doc.per_received) < 100 &&
+					flt(this.frm.doc.per_billed) < 100
 				) {
 					if (!this.frm.doc.__onload || this.frm.doc.__onload.can_update_items) {
 						this.frm.add_custom_button(__("Update Items"), () => {
@@ -309,7 +344,7 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 					}
 				}
 				if (this.frm.has_perm("submit")) {
-					if (flt(doc.per_billed, 2) < 100 || flt(doc.per_received, 2) < 100) {
+					if (flt(doc.per_billed) < 100 || flt(doc.per_received) < 100) {
 						if (doc.status != "On Hold") {
 							this.frm.add_custom_button(
 								__("Hold"),
@@ -332,7 +367,11 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 				}
 
 				if (is_drop_ship && doc.status != "Delivered") {
-					this.frm.add_custom_button(__("Delivered"), this.delivered_by_supplier, __("Status"));
+					this.frm.add_custom_button(
+						__("Delivered"),
+						this.delivered_by_supplier.bind(this),
+						__("Status")
+					);
 
 					this.frm.page.set_inner_btn_group_as_primary(__("Status"));
 				}
@@ -347,10 +386,12 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 			}
 			if (doc.status != "Closed") {
 				if (doc.status != "On Hold") {
-					if (flt(doc.per_received, 2) < 100 && allow_receipt) {
+					if (flt(doc.per_received) < 100 && allow_receipt) {
 						this.frm.add_custom_button(
 							__("Purchase Receipt"),
-							this.make_purchase_receipt,
+							() => {
+								me.make_purchase_receipt();
+							},
 							__("Create")
 						);
 						if (doc.is_subcontracted) {
@@ -365,22 +406,29 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 									);
 								}
 							} else {
-								this.frm.add_custom_button(
-									__("Subcontracting Order"),
-									this.make_subcontracting_order,
-									__("Create")
-								);
+								if (!doc.items.every((item) => item.qty == item.sco_qty)) {
+									this.frm.add_custom_button(
+										__("Subcontracting Order"),
+										() => {
+											me.make_subcontracting_order();
+										},
+										__("Create")
+									);
+								}
 							}
 						}
 					}
-					if (flt(doc.per_billed, 2) < 100)
+					// Please do not add precision in the below flt function
+					if (flt(doc.per_billed) < 100)
 						this.frm.add_custom_button(
 							__("Purchase Invoice"),
-							this.make_purchase_invoice,
+							() => {
+								me.make_purchase_invoice();
+							},
 							__("Create")
 						);
 
-					if (flt(doc.per_billed, 2) < 100 && doc.status != "Delivered") {
+					if (flt(doc.per_billed) < 100 && doc.status != "Delivered") {
 						this.frm.add_custom_button(
 							__("Payment"),
 							() => this.make_payment_entry(),
@@ -388,7 +436,7 @@ erpnext.buying.PurchaseOrderController = class PurchaseOrderController extends (
 						);
 					}
 
-					if (flt(doc.per_billed, 2) < 100) {
+					if (flt(doc.per_billed) < 100) {
 						this.frm.add_custom_button(
 							__("Payment Request"),
 							function () {

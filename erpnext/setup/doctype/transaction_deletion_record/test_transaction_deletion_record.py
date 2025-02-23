@@ -1,13 +1,21 @@
 # Copyright (c) 2021, Frappe Technologies Pvt. Ltd. and Contributors
 # See license.txt
 
-import unittest
 
 import frappe
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 
-class TestTransactionDeletionRecord(FrappeTestCase):
+class UnitTestTransactionDeletionRecord(UnitTestCase):
+	"""
+	Unit tests for TransactionDeletionRecord.
+	Use this class for testing individual functions and methods.
+	"""
+
+	pass
+
+
+class TestTransactionDeletionRecord(IntegrationTestCase):
 	def setUp(self):
 		create_company("Dunder Mifflin Paper Co")
 
@@ -26,7 +34,7 @@ class TestTransactionDeletionRecord(FrappeTestCase):
 			self.assertTrue(contains_company)
 
 	def test_no_of_docs_is_correct(self):
-		for i in range(5):
+		for _i in range(5):
 			create_task("Dunder Mifflin Paper Co")
 		tdr = create_transaction_deletion_doc("Dunder Mifflin Paper Co")
 		tdr.reload()
@@ -52,9 +60,7 @@ class TestTransactionDeletionRecord(FrappeTestCase):
 
 
 def create_company(company_name):
-	company = frappe.get_doc(
-		{"doctype": "Company", "company_name": company_name, "default_currency": "INR"}
-	)
+	company = frappe.get_doc({"doctype": "Company", "company_name": company_name, "default_currency": "INR"})
 	company.insert(ignore_if_duplicate=True)
 
 
